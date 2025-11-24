@@ -20,11 +20,38 @@ export interface Biometrics {
 export interface Exercise {
   id: string;
   name: string;
-  type: string;
-  description: string;
+  type?: string; // Optional now as it might be redundant with mechanics
+  description?: string;
+  constraints?: {
+    stationType: string;
+    movementPattern: string;
+    mechanics: string;
+  };
+  substitution?: {
+    tier: number;
+    loadCoefficient: number;
+    baseGroup: string;
+  };
   equipment: string; // Comma separated string
   displayMetadata: DisplayMetadata;
   biometrics: Biometrics;
+}
+
+export interface BanisterState {
+  fitness_g: number;    // Long-term adaptation (Tau=42)
+  fatigue_h: number;    // Short-term stress (Tau=7)
+  last_update: number;  // Timestamp (ms)
+}
+
+export type DUPPhase = 'Hypertrophy' | 'Strength' | 'Endurance';
+
+export interface NexusHistoryEntry {
+  weight: number;
+  reps: number;
+  sets: number;
+  date: number;
+  phase: DUPPhase;
+  e1rm: number;
 }
 
 export interface ExerciseLog {
@@ -36,7 +63,7 @@ export interface ExerciseLog {
 export interface SessionExercise {
   name: string;
   sets: number;
-  reps: string;
+  reps: string | number;
   load: string;
 }
 
@@ -66,21 +93,26 @@ export interface UserProfile {
   split_index: number; // Tracks rotation (0 = Day 1, 1 = Day 2, etc.)
   target_duration: number; // minutes
   
-  // Algorithm State
-  fatigue_state: Record<string, number>; // 0.0 (Fresh) to 1.0 (Exhausted)
-  systemic_capacity: number; // 1.0 (Low) to 5.0 (High)
+  // Nexus / Algorithm State
+  recovery_state: Record<string, BanisterState>;
+  current_phase: DUPPhase;
   current_systemic_fatigue: number; // Calculated accumulation
+  
+  // Legacy / UI Computed State
+  fatigue_state: Record<string, number>; // 0.0 (Fresh) to 1.0 (Exhausted) - Computed from Banister
+  systemic_capacity: number; // 1.0 (Low) to 5.0 (High)
+
   available_equipment: string[];
   injuries: string[];
   exercise_bias: Record<string, number>; // Multiplier for specific exercises
-  exercise_history: Record<string, ExerciseLog>; // Tracks last weight used per exercise (For Algorithm)
+  exercise_history: Record<string, NexusHistoryEntry>; 
   completed_sessions: CompletedSession[]; // Full ledger of past workouts (For Logbook UI)
 }
 
 export interface WorkoutItem {
   exercise: Exercise;
   sets: number;
-  reps: string; // Range e.g., "8-10"
+  reps: string | number; // Range e.g., "8-10" or number
   load: string; // "135 lbs"
   rest: string;
   slot_type: string;

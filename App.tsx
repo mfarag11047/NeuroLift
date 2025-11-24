@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { UserProfile, WorkoutItem, ChatMessage, CompletedSession } from './types';
 import { EXERCISE_DATABASE } from './data';
-import { AlgorithmEngine } from './services/algorithmEngine';
+import { AlgorithmEngine, BanisterModel } from './services/algorithmEngine';
 import { GeminiService } from './services/geminiService';
 import { BottomNav } from './components/BottomNav';
 import { WorkoutOverview } from './components/WorkoutOverview';
@@ -22,6 +22,7 @@ const getAllAvailableEquipment = (): string[] => {
   return Array.from(equipmentSet).sort();
 };
 
+// New Initial Profile Structure
 const INITIAL_PROFILE: UserProfile = {
   id: "user_01",
   stats: {
@@ -32,16 +33,18 @@ const INITIAL_PROFILE: UserProfile = {
   },
   experience: 'Intermediate',
   preferred_split: 'Push/Pull/Legs',
-  split_index: 0, // Day 1
-  target_duration: 60, // Minutes
+  split_index: 0, 
+  target_duration: 60,
   
-  fatigue_state: {
-    "Quadriceps": 0.1, "Hamstrings": 0.1, "Glutes": 0.1, "Erector Spinae": 0.2,
-    "Latissimus Dorsi": 0.1, "Pectoralis Major": 0.1, "Anterior Deltoid": 0.1,
-    "Biceps Brachii": 0.1, "Triceps Brachii": 0.1, "Core": 0.2
-  },
-  systemic_capacity: 3.0,
+  // Nexus State
+  recovery_state: {}, // Empty means fresh
+  current_phase: 'Hypertrophy',
   current_systemic_fatigue: 1.0,
+
+  // Legacy/UI Compat
+  fatigue_state: {}, 
+  systemic_capacity: 3.0,
+
   available_equipment: getAllAvailableEquipment(),
   injuries: [],
   exercise_bias: {},
@@ -64,7 +67,27 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isAiProcessing, setIsAiProcessing] = useState(false);
 
-  // Core Generator
+  // Compute visual fatigue for UI (0.0 - 1.0)
+  // Inverse of Banister Recovery Score (1.0 = Fresh, 0.0 = Tired)
+  // Banister returns "Recovery Score" (0-1), so 1 is good.
+  // The UI expects "Fatigue State" where 1 is tired (bad).
+  const visualFatigueState = React.useMemo(() => {
+    const muscles = [
+        "Quadriceps", "Hamstrings", "Glutes", "Erector Spinae", 
+        "Latissimus Dorsi", "Trapezius", "Pectoralis Major", 
+        "Anterior Deltoid", "Lateral Deltoid", "Posterior Deltoid",
+        "Biceps Brachii", "Triceps Brachii", "Core"
+    ];
+    const map: Record<string, number> = {};
+    const now = Date.now();
+    muscles.forEach(m => {
+        const state = profile.recovery_state[m];
+        const recovery = BanisterModel.getRecoveryScore(state, now); // 1 = Fresh
+        map[m] = 1.0 - recovery; // 0 = Fresh, 1 = Tired
+    });
+    return map;
+  }, [profile.recovery_state]);
+
   const handleGenerateWorkout = () => {
     const plan = algoEngine.generateWorkout(profile, EXERCISE_DATABASE);
     const currentPhase = algoEngine.getCurrentPhaseName(profile);
@@ -81,13 +104,13 @@ export default function App() {
   const handleCompleteWorkout = () => {
     if (workout.length === 0) return;
     
-    // 1. Update Stats (Fatigue + History)
+    // 1. Update Stats (Algorithm)
     let newProfile = algoEngine.applyWorkoutEffects(profile, workout);
 
     // 2. Log Session
     const totalVol = workout.reduce((acc, item) => {
        const weight = parseFloat(item.load.match(/(\d+(\.\d+)?)/)?.[0] || '0');
-       return acc + (weight * item.sets * 10);
+       return acc + (weight * item.sets * (typeof item.reps === 'number' ? item.reps : 10));
     }, 0);
 
     const sessionLog: CompletedSession = {
@@ -102,8 +125,8 @@ export default function App() {
       }))
     };
 
-    // 3. Rotate Split (Day 1 -> Day 2 -> Day 3 -> Day 1)
-    const splitMap = {
+    // 3. Rotate Split
+    const splitMap: Record<string, number> = {
       'Full Body': 1,
       'Upper/Lower': 2,
       'Push/Pull/Legs': 3,
@@ -136,7 +159,6 @@ export default function App() {
   };
 
   const handleUpdateProfile = (updates: Partial<UserProfile>) => {
-    // We wrap this because we need to trigger regen if experience/split changes
     setProfile(prev => ({ ...prev, ...updates }));
   };
 
@@ -151,9 +173,16 @@ export default function App() {
       const newProfile = { ...prev };
       if (intent.injuries_to_add) newProfile.injuries = [...new Set([...prev.injuries, ...intent.injuries_to_add])];
       if (intent.injuries_to_remove) newProfile.injuries = prev.injuries.filter(i => !intent.injuries_to_remove.includes(i));
-      if (intent.fatigue_modifications) newProfile.fatigue_state = { ...prev.fatigue_state, ...intent.fatigue_modifications };
+      
+      // Update Systemic Fatigue based on intent
+      if (intent.systemic_fatigue_delta) {
+          newProfile.current_systemic_fatigue = Math.max(0, Math.min(5, prev.current_systemic_fatigue + intent.systemic_fatigue_delta));
+      }
+      
+      // Note: We don't map AI fatigue to Banister model directly in this version
+      // as Banister requires impulse data. We rely on systemic fatigue adjustment.
+      
       if (intent.equipment_update) newProfile.available_equipment = intent.equipment_update;
-      if (intent.systemic_fatigue_delta) newProfile.current_systemic_fatigue = Math.max(0, Math.min(5, prev.current_systemic_fatigue + intent.systemic_fatigue_delta));
       return newProfile;
     });
 
@@ -168,16 +197,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Re-generate when profile structural parameters change (Split, Experience, Duration, AI Updates)
+  // Re-generate when core parameters change
   useEffect(() => {
     if (workout.length === 0 || isChatOpen === false) {
-        // We only auto-regen if we aren't in the middle of a workout
-        // or if the chat just closed (AI intervention)
-        // or if settings changed
         handleGenerateWorkout();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile.experience, profile.preferred_split, profile.target_duration, profile.injuries, profile.split_index]);
+  }, [profile.experience, profile.preferred_split, profile.target_duration, profile.injuries, profile.split_index, profile.current_phase]);
 
   return (
     <div className="bg-tactical text-zinc-200 font-sans selection:bg-emerald-500/30 overflow-hidden relative">
@@ -192,7 +218,7 @@ export default function App() {
                  <i className="ph-fill ph-barbell text-black text-xl"></i>
               </div>
               <div>
-                <div className="text-[9px] font-black tracking-[0.2em] text-emerald-500 font-mono mb-0.5">NEUROLIFT // OS</div>
+                <div className="text-[9px] font-black tracking-[0.2em] text-emerald-500 font-mono mb-0.5">NEUROLIFT // NEXUS</div>
                 <div className="text-lg font-bold text-white tracking-tight leading-none">Command Center</div>
               </div>
             </div>
@@ -214,7 +240,7 @@ export default function App() {
 
           {activeTab === 'recovery' && (
             <RecoveryView 
-              fatigueState={profile.fatigue_state} 
+              fatigueState={visualFatigueState} 
               systemicFatigue={profile.current_systemic_fatigue}
               onSimulateRest={handleRest}
             />
@@ -227,7 +253,8 @@ export default function App() {
 
       </main>
 
-      <div className="fixed bottom-24 right-5 z-40">
+      {/* Chat Button - Responsive Position to avoid overlap with Workout CTAs */}
+      <div className={`fixed right-5 z-40 transition-all duration-300 ${activeTab === 'workout' ? 'bottom-40 md:bottom-24' : 'bottom-24'}`}>
         <button 
           onClick={() => setIsChatOpen(true)}
           className="w-14 h-14 bg-zinc-100 hover:bg-white rounded-full shadow-[0_0_20px_rgba(255,255,255,0.15)] flex items-center justify-center text-black hover:scale-105 transition-transform active:scale-95 border border-white/20"
